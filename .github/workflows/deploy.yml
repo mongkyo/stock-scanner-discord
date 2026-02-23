@@ -1,0 +1,51 @@
+name: Deploy Discord Bot
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "StrictHostKeyChecking=no" >> ~/.ssh/config
+
+      - name: Stop bot
+        run: |
+          ssh -i ~/.ssh/deploy_key -o ConnectTimeout=30 opc@${{ secrets.SERVER_IP }} \
+            "sudo systemctl stop stock-scanner-discord.service || true"
+
+      - name: Upload files
+        run: |
+          scp -i ~/.ssh/deploy_key -o ConnectTimeout=30 \
+            config.py db.py kis_client.py analysis_engine.py main.py requirements.txt \
+            opc@${{ secrets.SERVER_IP }}:~/stock-scanner-discord/
+
+      - name: Install dependencies
+        run: |
+          ssh -i ~/.ssh/deploy_key -o ConnectTimeout=30 opc@${{ secrets.SERVER_IP }} \
+            "pip3 install -q -r ~/stock-scanner-discord/requirements.txt"
+
+      - name: Start bot
+        run: |
+          ssh -i ~/.ssh/deploy_key -o ConnectTimeout=30 opc@${{ secrets.SERVER_IP }} \
+            "sudo systemctl start stock-scanner-discord.service"
+
+      - name: Verify deployment (70초 대기)
+        run: |
+          echo "봇 초기화 대기 중 (70초)..."
+          sleep 70
+          ssh -i ~/.ssh/deploy_key -o ConnectTimeout=30 opc@${{ secrets.SERVER_IP }} \
+            "sudo systemctl is-active stock-scanner-discord.service && \
+             sudo journalctl -u stock-scanner-discord.service -n 5 --no-pager"
+
+      - name: SSH 키 삭제
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

@@ -197,47 +197,62 @@ def build_analysis_message(kospi_df: pd.DataFrame, kosdaq_df: pd.DataFrame,
 
 def run_collection(client: KISClient, db: DatabaseManager,
                    start_date: str, end_date: str) -> tuple[int, int]:
+    """이미 캐시된 종목(daily_prices)은 API 호출을 건너뜁니다."""
     print(f"\n[수집 시작] {start_date} ~ {end_date}")
 
-    print("\n[Step 1] 코스피 전체 종목 수익률 분석 중...")
-    kospi_all_df = client.get_top_growth_stocks(
-        start_date=start_date, end_date=end_date, market_code="J", top_n=None)
+    # 이미 캐시된 종목 확인 (API 호출 절약)
+    cached_codes = db.get_cached_stock_codes(start_date, end_date)
+    if cached_codes:
+        print(f"[캐시 확인] {len(cached_codes):,}개 종목 이미 저장됨 — API 호출 생략")
 
-    print("\n[Step 2] 코스닥 전체 종목 수익률 분석 중...")
-    kosdaq_all_df = client.get_top_growth_stocks(
-        start_date=start_date, end_date=end_date, market_code="Q", top_n=None)
+    daily_count = 0
 
-    if kospi_all_df.empty and kosdaq_all_df.empty:
+    # 코스피 일별 데이터 수집
+    print("\n[Step 1] 코스피 전체 종목 일별 데이터 수집 중...")
+    kospi_stocks = client._download_stock_list("J")
+    kospi_new = [s for s in kospi_stocks if s["종목코드"] not in cached_codes]
+    print(f"  → 전체 {len(kospi_stocks):,}개 중 {len(kospi_new):,}개 신규 수집")
+    if kospi_new:
+        kospi_records = client.get_all_stocks_daily(
+            kospi_new, start_date, end_date, "코스피")
+        db.save_daily_prices(kospi_records)
+        daily_count += len(kospi_records)
+
+    # 코스닥 일별 데이터 수집
+    print("\n[Step 2] 코스닥 전체 종목 일별 데이터 수집 중...")
+    kosdaq_stocks = client._download_stock_list("Q")
+    kosdaq_new = [s for s in kosdaq_stocks if s["종목코드"] not in cached_codes]
+    print(f"  → 전체 {len(kosdaq_stocks):,}개 중 {len(kosdaq_new):,}개 신규 수집")
+    if kosdaq_new:
+        kosdaq_records = client.get_all_stocks_daily(
+            kosdaq_new, start_date, end_date, "코스닥")
+        db.save_daily_prices(kosdaq_records)
+        daily_count += len(kosdaq_records)
+
+    if daily_count == 0 and not cached_codes:
         raise ValueError("수집 결과가 없습니다.")
 
-    price_count = 0
-    if not kospi_all_df.empty:
-        db.save_prices(kospi_all_df.to_dict("records"),
-                       start_date, end_date, "코스피")
-        price_count += len(kospi_all_df)
-    if not kosdaq_all_df.empty:
-        db.save_prices(kosdaq_all_df.to_dict("records"),
-                       start_date, end_date, "코스닥")
-        price_count += len(kosdaq_all_df)
+    # 재무 데이터: DB에서 TOP 종목 조회 후 ROE/영업이익률 수집
+    print(f"\n[Step 3] 재무 데이터(ROE, 영업이익률) 조회 중...")
+    kospi_top = db.get_prices(start_date, end_date, market="코스피", top_n=config.TOP_N)
+    kosdaq_top = db.get_prices(start_date, end_date, market="코스닥", top_n=config.TOP_N)
+    combined_top = db.get_prices(start_date, end_date, top_n=config.TOP_N)
 
-    combined_all = pd.concat([kospi_all_df, kosdaq_all_df], ignore_index=True)
-    combined_all.sort_values("수익률(%)", ascending=False, inplace=True)
+    seen: set = set()
+    unique_for_fin: list = []
+    for records in [kospi_top, kosdaq_top, combined_top]:
+        for r in records:
+            if r["종목코드"] not in seen:
+                seen.add(r["종목코드"])
+                unique_for_fin.append(r)
 
-    seen, unique_records = set(), []
-    for df_part in [kospi_all_df.head(config.TOP_N),
-                    kosdaq_all_df.head(config.TOP_N),
-                    combined_all.head(config.TOP_N)]:
-        for _, row in df_part.iterrows():
-            if row["종목코드"] not in seen:
-                seen.add(row["종목코드"])
-                unique_records.append(row.to_dict())
-
-    print(f"\n[Step 3] 재무 데이터 조회 중... ({len(unique_records)}개)")
-    financial_results = client.add_financial_data(unique_records)
+    print(f"  → 고유 종목 {len(unique_for_fin):,}개")
+    financial_results = client.add_financial_data(unique_for_fin)
     db.save_financials(financial_results)
+    fin_count = len(financial_results)
 
-    print(f"\n[수집 완료] 가격 {price_count:,}건, 재무 {len(financial_results):,}건")
-    return price_count, len(financial_results)
+    print(f"\n[수집 완료] 일별 가격 {daily_count:,}건 신규 저장, 재무 {fin_count:,}건")
+    return daily_count, fin_count
 
 
 def run_analysis_from_db(db: DatabaseManager,

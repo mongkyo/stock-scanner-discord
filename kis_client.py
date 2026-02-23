@@ -724,6 +724,80 @@ class KISClient:
 
         return df
 
+    def get_all_stocks_daily(self, stocks: list, start_date: str,
+                             end_date: str, market: str) -> list[dict]:
+        """종목 리스트의 일별 OHLCV를 병렬 조회하여 daily_prices 형식으로 반환
+
+        Args:
+            stocks: [{"종목코드": ..., "종목명": ...}, ...]
+            start_date: 시작일 (YYYYMMDD)
+            end_date: 종료일 (YYYYMMDD)
+            market: '코스피' 또는 '코스닥'
+
+        Returns:
+            [{"날짜", "종목코드", "종목명", "시장",
+              "시가", "고가", "저가", "종가", "거래량"}, ...]
+        """
+        self.get_access_token()
+
+        all_records = []
+        records_lock = threading.Lock()
+        total = len(stocks)
+        completed = [0]
+
+        def _fetch_one(stock):
+            code = stock["종목코드"]
+            name = stock["종목명"]
+            time.sleep(0.05)
+            try:
+                daily = self.get_daily_ohlcv(code, start_date, end_date)
+
+                with records_lock:
+                    completed[0] += 1
+                    idx = completed[0]
+
+                if not daily:
+                    print(f"  [{idx}/{total}] {name}({code}) - 데이터 없음, 건너뜀")
+                    return
+
+                records = [
+                    {
+                        "날짜": r["stck_bsop_date"],
+                        "종목코드": code,
+                        "종목명": name,
+                        "시장": market,
+                        "시가": int(r.get("stck_oprc", 0) or 0),
+                        "고가": int(r.get("stck_hgpr", 0) or 0),
+                        "저가": int(r.get("stck_lwpr", 0) or 0),
+                        "종가": int(r.get("stck_clpr", 0) or 0),
+                        "거래량": int(r.get("cntg_vol", 0) or 0),
+                    }
+                    for r in daily
+                    if int(r.get("stck_clpr", 0) or 0) > 0
+                ]
+
+                if records:
+                    with records_lock:
+                        all_records.extend(records)
+                    if idx % 200 == 0 or idx == total:
+                        print(f"  [{idx}/{total}] 진행 중...")
+                else:
+                    print(f"  [{idx}/{total}] {name}({code}) - 유효 데이터 없음")
+
+            except Exception as e:
+                with records_lock:
+                    completed[0] += 1
+                    idx = completed[0]
+                print(f"  [{idx}/{total}] {name}({code}) - 오류: {e}")
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(_fetch_one, s) for s in stocks]
+            for future in as_completed(futures):
+                future.result()
+
+        print(f"[일별 데이터 수집 완료] {len(all_records)}건 ({market})")
+        return all_records
+
 
 # === 사용 예시 ===
 if __name__ == "__main__":
